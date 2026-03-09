@@ -1,14 +1,14 @@
 /**
 # Copyright (c) Advanced Micro Devices, Inc. All rights reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the \"License\");
+# Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an \"AS IS\" BASIS,
+# distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
@@ -19,7 +19,9 @@ package oci
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ROCm/container-toolkit/internal/amdgpu"
@@ -63,6 +65,58 @@ type GetUniqueIdToDeviceIndexMap func() (map[string][]int, error)
 
 // ReserveGPUs is the type for functions that return a list of reserved GPUs
 type ReserveGPUs func(string, string) ([]int, error)
+
+// ContainerState represents minimal OCI container state needed for hooks
+type ContainerState struct {
+	// Bundle is the path to the container's bundle directory
+	Bundle string `json:"bundle"`
+	// Pid is the container process ID (not used for symlink creation)
+	Pid int `json:"pid,omitempty"`
+}
+
+// LoadContainerState reads the OCI container state from the specified path.
+// If path is empty or "-", it reads from stdin. This matches the OCI runtime
+// hook specification for receiving container state.
+func LoadContainerState(path string) (*ContainerState, error) {
+	var reader io.Reader
+	if path == "" || path == "-" {
+		reader = os.Stdin
+	} else {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open container state: %w", err)
+		}
+		defer file.Close()
+		reader = file
+	}
+
+	var state ContainerState
+	if err := json.NewDecoder(reader).Decode(&state); err != nil {
+		return nil, fmt.Errorf("failed to decode container state: %w", err)
+	}
+
+	return &state, nil
+}
+
+// GetContainerRoot returns the container's root filesystem path.
+// For OCI bundles, this is typically bundle/rootfs, but we verify it exists.
+func (s *ContainerState) GetContainerRoot() (string, error) {
+	if s.Bundle == "" {
+		return "", fmt.Errorf("bundle path is empty")
+	}
+
+	// Standard OCI bundle structure has rootfs as a subdirectory
+	rootfs := filepath.Join(s.Bundle, "rootfs")
+	if _, err := os.Stat(rootfs); err != nil {
+		if os.IsNotExist(err) {
+			// Fallback: bundle itself might be the root
+			return s.Bundle, nil
+		}
+		return "", fmt.Errorf("failed to access container root: %w", err)
+	}
+
+	return rootfs, nil
+}
 
 // oci_t implements the OCI interface
 type oci_t struct {
